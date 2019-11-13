@@ -1,0 +1,191 @@
+K8S从私有仓库拉取镜像
+
+通常来讲，我们在通过公共镜像仓库拉取docker镜像的时候，不需要任何的认证操作，但我们在构建了企业的私有镜像以后，就不得不在拉取镜像之前通过用户名密码来完成认证。
+在docker单机环境中，我们可以直接在宿主机上执行docker login https://myhub.fdccloud.com类似这种命令的方式来完成认证。但在通过kubernetes来对docker做相关集群管理时，就不得不在所有的节点机上通过上面那种方式完成认证，这在大规模的应用架构中，是不可取的。
+当然我们有另外一种稍微简便的方法，事实上在执行docker login https://xxxxx完成认证的时候，实际是在当前用户的家目录的.docker目录下生成了一个config.json文件，我们查看该文件的内容如下：
+[root@cs-76-4 ~]# cat .docker/config.json 
+{
+	"auths": {
+		"reg.youlai.cn": {
+			"auth": "YWRtaW46SGFyYm9yMTIzNDU="
+		}
+	},
+	"HttpHeaders": {
+		"User-Agent": "Docker-Client/19.03.4 (linux)"
+	}
+}
+这个文件包含了认证信息，所以另一个可行的办法，就是直接将该文件通过自动化的方式，推送到所有节点机的相应目录即可，但在实际的测试中，这种方式推送的节点仍然会偶尔出现认证失败的情况。
+
+kubernetes提供多种针对私有仓库认证的方式，在这只说明其中的一种方法，也是实际使用的方法，通过k8s的secret来实现。
+
+[root@cs-76-m ~]# cat /etc/hosts
+127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4 cs-76-m
+::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+192.168.100.90 cs-76-1
+192.168.100.91 cs-76-2
+192.168.100.92 cs-76-m
+192.168.100.24 cs-76-4
+192.168.100.92 apiserver.demo
+192.168.100.24 nfs.ilinux.io
+192.168.100.24 reg.youlai.cn
+
+[root@cs-76-1 ~]# cat /etc/hosts
+127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4 cs-76-1
+::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+192.168.100.90 cs-76-1
+192.168.100.91 cs-76-2
+192.168.100.92 cs-76-m
+192.168.100.92 apiserver.demo
+192.168.100.24 nfs.ilinux.io
+192.168.100.24 reg.youlai.cn
+
+[root@cs-76-2 ~]# cat /etc/hosts
+127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4 cs-76-1
+::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+192.168.100.90 cs-76-1
+192.168.100.91 cs-76-2
+192.168.100.92 cs-76-m
+192.168.100.92 apiserver.demo
+192.168.100.24 nfs.ilinux.io
+192.168.100.24 reg.youlai.cn
+
+[root@cs-76-m ~]# docker pull reg.youlai.cn/paas/centos:7.6.1810
+Error response from daemon: pull access denied for reg.youlai.cn/paas/centos, repository does not exist or may require 'docker login'
+
+[root@cs-76-m ~]# docker login https://reg.youlai.cn
+Username: admin
+Password: 
+WARNING! Your password will be stored unencrypted in /root/.docker/config.json.
+Configure a credential helper to remove this warning. See
+https://docs.docker.com/engine/reference/commandline/login/#credentials-store
+Login Succeeded
+
+[root@cs-76-m ~]# ll .docker/
+-rw------- 1 root root 151 Nov  9 21:33 config.json
+
+[root@cs-76-m ~]# cat .docker/config.json 
+{
+	"auths": {
+		"reg.youlai.cn": {
+			"auth": "YWRtaW46SGFyYm9yMTIzNDU="
+		}
+	},
+	"HttpHeaders": {
+		"User-Agent": "Docker-Client/18.09.7 (linux)"
+	}
+}
+
+在k8s master上通过docker login登录registry，生成config.json文件，然后执行如下命令，将文件转换成base64编码：
+ [root@cs-76-m ~]# cat /root/.docker/config.json|base64 -w 0
+ewoJImF1dGhzIjogewoJCSJyZWcueW91bGFpLmNuIjogewoJCQkiYXV0aCI6ICJZV1J0YVc0NlNHRnlZbTl5TVRJek5EVT0iCgkJfQoJfSwKCSJIdHRwSGVhZGVycyI6IHsKCQkiVXNlci1BZ2VudCI6ICJEb2NrZXItQ2xpZW50LzE4LjA5LjcgKGxpbnV4KSIKCX0KfQ==
+
+[root@cs-76-m ~]# mkdir harbor
+
+[root@cs-76-m ~]# cd harbor/
+
+[root@cs-76-m harbor]# cat harbor-myhub.yaml 
+apiVersion: v1
+kind: Secret
+metadata:
+  name: registrykey-myhub
+  namespace: default
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: ewoJImF1dGhzIjogewoJCSJyZWcueW91bGFpLmNuIjogewoJCQkiYXV0aCI6ICJZV1J0YVc0NlNHRnlZbTl5TVRJek5EVT0iCgkJfQoJfSwKCSJIdHRwSGVhZGVycyI6IHsKCQkiVXNlci1BZ2VudCI6ICJEb2NrZXItQ2xpZW50LzE4LjA5LjcgKGxpbnV4KSIKCX0KfQ==
+  
+[root@cs-76-m harbor]# kubectl apply -f harbor-myhub.yaml 
+secret/registrykey-myhub created
+
+[root@cs-76-m harbor]# kubectl get secret
+NAME                                 TYPE                                  DATA   AGE
+default-token-vdgd7                  kubernetes.io/service-account-token   3      3d2h
+nfs-client-provisioner-token-kfjtg   kubernetes.io/service-account-token   3      132m
+registrykey-myhub                    kubernetes.io/dockerconfigjson        1      28s
+
+[root@cs-76-m harbor]# cat pod-harbor.yaml 
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deployment
+  labels:
+    app: nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: reg.youlai.cn/paas/nginx:1.7.9
+      imagePullSecrets:
+      - name: registrykey-myhub
+	  
+[root@cs-76-m harbor]# kubectl apply -f pod-harbor.yaml 
+deployment.apps/nginx-deployment created
+
+[root@cs-76-m harbor]# kubectl get pod -l app=nginx
+NAME                                READY   STATUS    RESTARTS   AGE
+nginx-deployment-6d6cb6596c-rkmj4   1/1     Running   0          41s
+
+[root@cs-76-m harbor]# kubectl describe pod nginx-deployment-6d6cb6596c-rkmj4
+Name:         nginx-deployment-6d6cb6596c-rkmj4
+Namespace:    default
+Priority:     0
+Node:         cs-76-1/192.168.100.90
+Start Time:   Sat, 09 Nov 2019 07:45:24 +0800
+Labels:       app=nginx
+              pod-template-hash=6d6cb6596c
+Annotations:  cni.projectcalico.org/podIP: 10.100.88.23/32
+Status:       Running
+IP:           10.100.88.23
+IPs:
+  IP:           10.100.88.23
+Controlled By:  ReplicaSet/nginx-deployment-6d6cb6596c
+Containers:
+  nginx:
+    Container ID:   docker://8c8c7ee3335d2c441655d5dad61c21c8175387636c3a45f5ee4893d568db1a53
+    Image:          reg.youlai.cn/paas/nginx:1.7.9
+    Image ID:       docker-pullable://reg.youlai.cn/paas/nginx@sha256:b1f5935eb2e9e2ae89c0b3e2e148c19068d91ca502e857052f14db230443e4c2
+    Port:           <none>
+    Host Port:      <none>
+    State:          Running
+      Started:      Sat, 09 Nov 2019 07:45:40 +0800
+    Ready:          True
+    Restart Count:  0
+    Environment:    <none>
+    Mounts:
+      /var/run/secrets/kubernetes.io/serviceaccount from default-token-vdgd7 (ro)
+Conditions:
+  Type              Status
+  Initialized       True 
+  Ready             True 
+  ContainersReady   True 
+  PodScheduled      True 
+Volumes:
+  default-token-vdgd7:
+    Type:        Secret (a volume populated by a Secret)
+    SecretName:  default-token-vdgd7
+    Optional:    false
+QoS Class:       BestEffort
+Node-Selectors:  <none>
+Tolerations:     node.kubernetes.io/not-ready:NoExecute for 300s
+                 node.kubernetes.io/unreachable:NoExecute for 300s
+Events:
+  Type    Reason     Age        From               Message
+  ----    ------     ----       ----               -------
+  Normal  Scheduled  <unknown>  default-scheduler  Successfully assigned default/nginx-deployment-6d6cb6596c-rkmj4 to cs-76-1
+  Normal  Pulling    14h        kubelet, cs-76-1   Pulling image "reg.youlai.cn/paas/nginx:1.7.9"
+  Normal  Pulled     14h        kubelet, cs-76-1   Successfully pulled image "reg.youlai.cn/paas/nginx:1.7.9"
+  Normal  Created    14h        kubelet, cs-76-1   Created container nginx
+  Normal  Started    14h        kubelet, cs-76-1   Started container nginx
+
+[root@cs-76-1 ~]# docker images |grep "reg.youlai.cn"
+reg.youlai.cn/paas/nginx     1.7.9               84581e99d807        4 years ago         91.7MB
+
+[root@cs-76-1 ~]# ll .docker
+ls: cannot access .docker: No such file or directory
